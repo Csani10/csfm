@@ -100,6 +100,10 @@ fn file_button(state: &'_ CsFM) -> iced::widget::button::Style {
     }
 }
 
+fn container_style(theme: &Theme) -> iced::widget::container::Style {
+   iced::widget::container::Style { border: Border { color: theme.palette().primary, width: 5.0, radius: Radius::new(10) }, ..Default::default() } 
+}
+
 fn view(state: &'_ CsFM) -> Element<'_, Message> {
     let files: Vec<Element<Message>> = state.current_files.iter().map(|f| {
         if f.1 {
@@ -116,18 +120,23 @@ fn view(state: &'_ CsFM) -> Element<'_, Message> {
 
     if state.sidebar_open {
         main_view = main_view.push(
-            column![text("fasz")]
+            container(column![
+                iced::widget::button(text("Home")).style(|t, s| dir_button(state)).on_press(Message::CD(PathBuf::from("/home/csani"))),
+                iced::widget::button(text("Documents")).style(|t, s| dir_button(state)).on_press(Message::CD(PathBuf::from("/home/csani/Dokumentumok"))),
+                ].padding(5)).padding(5).style(container_style).width(150).height(Length::Fill)
         );
     }
 
-    main_view = main_view.push(scrollable(column(files).spacing(5).padding(5)).width(Length::Fill).height(Length::Fill));
+    main_view = main_view.push(container(scrollable(column(files).spacing(5).padding(5)).width(Length::Fill).height(Length::Fill)).style(container_style).padding(5));
 
     column![
-        row![
+        container(
+            row![
             iced::widget::button(if state.sidebar_open {"<"} else {">"}).on_press(Message::ToggleSidebar),
             iced::widget::button("Up").on_press(Message::Up),
             text_input("Path", &state.path.to_string_lossy().to_string()).on_input(Message::PathChanged).on_submit(Message::CDToPath).padding(5),
-        ].spacing(5).spacing(5),
+        ].padding(5).spacing(5)
+        ).style(container_style).padding(5),
         main_view
     ]
     .padding(5)
