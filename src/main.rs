@@ -1,7 +1,14 @@
-use std::{fs, io, iter, path::{Path, PathBuf}, vec};
+use std::{fmt::Error, fs, io, iter, path::{Path, PathBuf}, vec};
 
-use iced::{self, Alignment, Border, Element, Length, Task, Theme, border::Radius, widget::{button::{self, Style}, column, container, row, scrollable, text, text_input}, window::Id};
+use iced::{
+    self, Alignment, Border, Element, Length, Task, Theme,
+    advanced::graphics::{core::Element as CoreElement, text::cosmic_text::ttf_parser::loca},
+    border::Radius,
+    widget::{button::{self, Style}, column, container, row, scrollable, text, text_input},
+    window::Id,
+};
 use iced_aw::{ContextMenu, DropDown, Menu, MenuBar, context_menu, drop_down, menu::Item};
+use serde::Deserialize;
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -15,9 +22,22 @@ enum Message {
 }
 
 struct CsFM {
+    config: Config,
     path: PathBuf,
     current_files: Vec<(PathBuf, bool)>,
     sidebar_open: bool
+}
+
+#[derive(Clone, Deserialize)]
+struct Config {
+    pub theme: String,
+    pub sidebar_loc: Vec<Location>
+}
+
+#[derive(Clone, Deserialize)]
+struct Location {
+    pub title: String,
+    pub path: String
 }
 
 fn theme(_state: &CsFM) -> Theme {
@@ -104,44 +124,115 @@ fn container_style(theme: &Theme) -> iced::widget::container::Style {
    iced::widget::container::Style { border: Border { color: theme.palette().primary, width: 5.0, radius: Radius::new(10) }, ..Default::default() } 
 }
 
-fn view(state: &'_ CsFM) -> Element<'_, Message> {
-    let files: Vec<Element<Message>> = state.current_files.iter().map(|f| {
-        if f.1 {
-            iced::widget::button(text(f.0.file_name().unwrap().to_string_lossy().to_string())).style(|t, s| dir_button(state)).on_press(Message::CD(f.0.clone())).into()
-        }
-        else {
-            iced::widget::button(text(f.0.file_name().unwrap().to_string_lossy().to_string())).style(|t, s| file_button(state)).into()
-        }
-    }
-    )
-    .collect();
+fn locations(state: &CsFM) -> Vec<Element<Message>> {
+    let mut locs = vec![
+        iced::widget::text("Places").into(),
+    ];
 
-    let mut main_view = row![].padding(5).spacing(5);;
+    for location in state.config.sidebar_loc.iter() {
+        locs.push(iced::widget::button(text(location.title.clone())).style(|t, s| dir_button(state)).on_press(Message::CD(PathBuf::from(PathBuf::from(location.path.clone())))).into());
+    }
+
+    locs
+}
+
+
+fn view(state: &CsFM) -> Element<'_, Message> {
+    // ----- FILE LIST -----
+    let files: Vec<Element<Message>> = state
+        .current_files
+        .iter()
+        .map(|f| {
+            let name = f
+                .0
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+
+            if f.1 {
+                // Directory
+                iced::widget::button(text(name))
+                    .style(|_, _| dir_button(state))
+                    .on_press(Message::CD(f.0.clone()))
+                    .into()
+            } else {
+                // File
+                iced::widget::button(text(name))
+                    .style(|_, _| file_button(state))
+                    .into()
+            }
+        })
+        .collect();
+
+    let file_list = container(
+        scrollable(
+            column(files)
+                .spacing(5)
+                .padding(5)
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+    )
+    .style(container_style)
+    .padding(5);
+
+    // ----- SIDEBAR -----
+    let mut main_view = row![].padding(5).spacing(5);
 
     if state.sidebar_open {
+        let sidebar =
+            column![]
+                .extend(locations(state))  // <── FIXED HERE
+                .padding(5)
+                .spacing(5);
+
         main_view = main_view.push(
-            container(column![
-                iced::widget::button(text("Home")).style(|t, s| dir_button(state)).on_press(Message::CD(PathBuf::from("/home/csani"))),
-                iced::widget::button(text("Documents")).style(|t, s| dir_button(state)).on_press(Message::CD(PathBuf::from("/home/csani/Dokumentumok"))),
-                ].padding(5)).padding(5).style(container_style).width(150).height(Length::Fill)
+            container(sidebar)
+                .padding(5)
+                .style(container_style)
+                .width(150)
+                .height(Length::Fill),
         );
     }
 
-    main_view = main_view.push(container(scrollable(column(files).spacing(5).padding(5)).width(Length::Fill).height(Length::Fill)).style(container_style).padding(5));
+    // Push FILE LIST into main_view
+    main_view = main_view.push(file_list);
 
+
+    // ----- TOP BAR -----
+    let top_bar = container(
+        row![
+            iced::widget::button(if state.sidebar_open { "<" } else { ">" })
+                .on_press(Message::ToggleSidebar),
+
+            iced::widget::button("Up")
+                .on_press(Message::Up),
+
+            text_input(
+                "Path",
+                &state.path.to_string_lossy().to_string()
+            )
+            .on_input(Message::PathChanged)
+            .on_submit(Message::CDToPath)
+            .padding(5),
+        ]
+        .padding(5)
+        .spacing(5)
+    )
+    .style(container_style)
+    .padding(5);
+
+
+    // ----- FINAL LAYOUT -----
     column![
-        container(
-            row![
-            iced::widget::button(if state.sidebar_open {"<"} else {">"}).on_press(Message::ToggleSidebar),
-            iced::widget::button("Up").on_press(Message::Up),
-            text_input("Path", &state.path.to_string_lossy().to_string()).on_input(Message::PathChanged).on_submit(Message::CDToPath).padding(5),
-        ].padding(5).spacing(5)
-        ).style(container_style).padding(5),
-        main_view
+        top_bar,
+        main_view,
     ]
     .padding(5)
     .into()
 }
+
 
 fn get_files(path: PathBuf) -> Vec<(PathBuf, bool)> {
     let mut files_and_dirs = vec![];
@@ -176,14 +267,30 @@ fn get_files(path: PathBuf) -> Vec<(PathBuf, bool)> {
     files_and_dirs
 }
 
+fn load_config() -> Config {
+    let path = std::env::home_dir()
+        .unwrap()
+        .join(".config/csdesktop/csfm.toml");
+
+    println!("{}", path.clone().to_string_lossy().to_string());
+
+    let data = std::fs::read_to_string(path).unwrap();
+    let config: Config = toml::from_str(&data).unwrap();
+    
+    config
+}
+
+
 impl Default for CsFM {
     fn default() -> Self {
         let path = std::env::current_dir().unwrap_or(PathBuf::from("/"));
         let current_files = get_files(path.clone());
+        let cfg = load_config();
         CsFM {
+            config: cfg,
             path,
             current_files,
-            sidebar_open: false
+            sidebar_open: true
         }
     }
 }
