@@ -1,11 +1,7 @@
-use std::{fmt::Error, fs, io, iter, path::{Path, PathBuf}, vec};
+use std::{ffi::OsStr, fmt::Error, fs, io, iter, path::{Path, PathBuf}, process::Command, vec};
 
 use iced::{
-    self, Alignment, Border, Element, Length, Task, Theme,
-    advanced::graphics::{core::Element as CoreElement, text::cosmic_text::ttf_parser::loca},
-    border::Radius,
-    widget::{button::{self, Style}, column, container, row, scrollable, text, text_input},
-    window::Id,
+    self, Alignment, Background, Border, Element, Length, Task, Theme, advanced::graphics::{core::Element as CoreElement, text::cosmic_text::ttf_parser::loca}, border::Radius, widget::{button::{self, Style}, column, container, row, scrollable, text, text_input}, window::Id
 };
 use iced_aw::{ContextMenu, DropDown, Menu, MenuBar, context_menu, drop_down, menu::Item};
 use serde::Deserialize;
@@ -16,6 +12,9 @@ enum Message {
     CDToPath,
     CD(PathBuf),
     QuitApp(Option<Id>),
+    Open(PathBuf),
+    DeleteFile(PathBuf),
+    DeleteDir(PathBuf),
     ToggleSidebar,
     Up,
     None,
@@ -28,9 +27,10 @@ struct CsFM {
     sidebar_open: bool
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Default)]
 struct Config {
     pub theme: String,
+    pub show_hidden_files: bool,
     pub sidebar_loc: Vec<Location>
 }
 
@@ -44,6 +44,43 @@ fn theme(_state: &CsFM) -> Theme {
     Theme::GruvboxDark
 }
 
+fn question_zenity(question: String) -> bool {
+    let out = Command::new("zenity")
+        .arg("--question")
+        .arg("--title=CsFM")
+        .arg(format!("--text={}", question))
+        .output();
+
+    match out {
+        Ok(o) => {
+            return o.status.success();
+        }
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            error_zenity(format!("Error: {}", e));
+            return false;
+        }
+    }
+}
+
+fn error_zenity(message: String) -> bool {
+    let out = Command::new("zenity")
+        .arg("--error")
+        .arg("--title=CsFM")
+        .arg(format!("--text={}", message))
+        .output();
+
+    match out {
+        Ok(o) => {
+            return o.status.success();
+        }
+        Err(e) => {
+            println!("Error: {}", e);
+            return false;
+        }
+    }
+}
+
 fn update(state: &mut CsFM, message: Message) -> Task<Message> {
     match message {
         Message::None => {
@@ -53,20 +90,13 @@ fn update(state: &mut CsFM, message: Message) -> Task<Message> {
             let path = PathBuf::from(s);
             let path_str = path.clone().to_string_lossy().to_string();
             state.path = path;
-            println!("{path_str}");
             Task::none()
         }
         Message::CDToPath => {
-            let files = get_files(PathBuf::from(&state.path));
+            let files = get_files(PathBuf::from(&state.path), state.config.show_hidden_files);
             
             if !files.is_empty() {
                 state.current_files = files.clone();
-            }
-
-            for file in files {
-                let path = file.0.to_string_lossy().to_string();
-                let is_dir = file.1;
-                println!("{path}, {is_dir}");
             }
 
             Task::none()
@@ -75,6 +105,31 @@ fn update(state: &mut CsFM, message: Message) -> Task<Message> {
             state.path = state.path.parent().unwrap_or(PathBuf::from("/").as_path()).to_path_buf();
 
             Task::done(Message::CDToPath)
+        }
+        Message::DeleteFile(path) => {
+            let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+            let out = question_zenity(format!("Delete '{}'?", file_name));
+            if out {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    error_zenity(format!("Failed to delete: {}", e));
+                }
+            }
+            Task::done(Message::CDToPath)
+        }
+        Message::DeleteDir(path) => {
+            let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+            let out = question_zenity(format!("Delete '{}' and all contents?", file_name));
+            if out {
+                if let Err(e) = std::fs::remove_dir_all(&path) {
+                    error_zenity(format!("Failed to delete dir: {}", e));
+                }
+            }
+            Task::done(Message::CDToPath)
+        }
+        Message::Open(path) => {
+            open::that_detached(path).unwrap();
+            
+            Task::none()
         }
         Message::CD(path) => {
             state.path = path;
@@ -136,6 +191,9 @@ fn locations(state: &CsFM) -> Vec<Element<Message>> {
     locs
 }
 
+fn context_menu_container_style(theme: &Theme) -> iced::widget::container::Style {
+   iced::widget::container::Style { border: Border { color: theme.palette().primary, width: 5.0, radius: Radius::new(10) }, background: Option::from(Background::Color(theme.palette().background)), ..Default::default() } 
+}
 
 fn view(state: &CsFM) -> Element<'_, Message> {
     // ----- FILE LIST -----
@@ -149,18 +207,23 @@ fn view(state: &CsFM) -> Element<'_, Message> {
                 .unwrap()
                 .to_string_lossy()
                 .to_string();
-
+            
             if f.1 {
                 // Directory
-                iced::widget::button(text(name))
+                let btn = iced::widget::button(text(name))
                     .style(|_, _| dir_button(state))
-                    .on_press(Message::CD(f.0.clone()))
-                    .into()
+                    .on_press(Message::CD(f.0.clone()));
+                context_menu::ContextMenu::new(btn, || container(column![iced::widget::button(text("Open")).on_press(Message::CD(f.0.clone())),
+                    iced::widget::button(text("Delete")).on_press(Message::DeleteDir(f.0.clone()))].spacing(5)).style(context_menu_container_style).padding(10).into()).into()
             } else {
                 // File
-                iced::widget::button(text(name))
+                let btn = iced::widget::button(text(name))
                     .style(|_, _| file_button(state))
-                    .into()
+                    .on_press(Message::Open(f.0.clone()));
+                context_menu::ContextMenu::new(btn, || container(column![
+                    iced::widget::button(text("Open")).on_press(Message::Open(f.0.clone())),
+                    iced::widget::button(text("Delete")).on_press(Message::DeleteFile(f.0.clone()))
+                ].spacing(5)).style(context_menu_container_style).padding(10).into() ).into()
             }
         })
         .collect();
@@ -234,45 +297,51 @@ fn view(state: &CsFM) -> Element<'_, Message> {
 }
 
 
-fn get_files(path: PathBuf) -> Vec<(PathBuf, bool)> {
+fn get_files(path: PathBuf, show_hidden_files: bool) -> Vec<(PathBuf, bool)> {
     let mut files_and_dirs = vec![];
 
-    let mut files = vec![];
-    let mut dirs = vec![];
+    let entries = match fs::read_dir(&path) {
+        Ok(e) => e,
+        Err(_) => return files_and_dirs,
+    };
 
-    let paths = fs::read_dir(path);
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
 
-    if paths.is_err() {
-        return files_and_dirs;
+        let file_name = entry.file_name().to_string_lossy().to_string();
+
+        if !show_hidden_files && file_name.starts_with('.') {
+            continue;
+        }
+
+        let p = entry.path();
+        let is_dir = p.is_dir();
+
+        files_and_dirs.push((p, is_dir));
     }
 
-    for path in paths.unwrap() {
-        let path = path.unwrap();
-
-        if path.path().is_dir() {
-            dirs.push((path.path(), true));
+    // ---- SORT HERE ----
+    files_and_dirs.sort_by(|a, b| {
+        match (a.1, b.1) {
+            (true, false) => std::cmp::Ordering::Less,   // directories first
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.0.file_name().cmp(&b.0.file_name())     // alphabetic inside groups
         }
-        else {
-            files.push((path.path(), false));
-        }
-    }
+    });
 
-    dirs.sort();
-    files.sort();
-
-    files_and_dirs.append(&mut dirs);
-    files_and_dirs.append(&mut files);
-
-    
     files_and_dirs
 }
+
+
 
 fn load_config() -> Config {
     let path = std::env::home_dir()
         .unwrap()
         .join(".config/csdesktop/csfm.toml");
 
-    println!("{}", path.clone().to_string_lossy().to_string());
 
     let data = std::fs::read_to_string(path).unwrap();
     let config: Config = toml::from_str(&data).unwrap();
@@ -284,8 +353,8 @@ fn load_config() -> Config {
 impl Default for CsFM {
     fn default() -> Self {
         let path = std::env::current_dir().unwrap_or(PathBuf::from("/"));
-        let current_files = get_files(path.clone());
         let cfg = load_config();
+        let current_files = get_files(path.clone(), false);
         CsFM {
             config: cfg,
             path,
